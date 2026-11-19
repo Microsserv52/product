@@ -1,0 +1,3 @@
+[submodule "mocks"]
+	path = mocks
+	url = git@github.com:Microsserv52/mocks.git
