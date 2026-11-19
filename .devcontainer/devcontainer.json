@@ -1,0 +1,16 @@
+{
+  "name": "Product service",
+  "image": "mcr.microsoft.com/devcontainers/java:3-25-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "forwardPorts": [8080, 8081, 5432, 6379],
+  "portsAttributes": {
+    "8080": { "label": "Product API" },
+    "8081": { "label": "Local identity mock" },
+    "5432": { "label": "PostgreSQL" },
+    "6379": { "label": "Redis" }
+  },
+  "postCreateCommand": "./scripts/bootstrap.sh",
+  "remoteUser": "vscode"
+}

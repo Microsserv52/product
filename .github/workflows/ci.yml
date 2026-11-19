@@ -1,0 +1,187 @@
+name: Product CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+  id-token: write
+  attestations: write
+
+env:
+  IMAGE: ghcr.io/microsserv52/product
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - name: Validate Maven project
+        run: ./mvnw --batch-mode --no-transfer-progress validate
+      - name: Check whitespace and merge markers
+        run: |
+          git diff --check
+          ! grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' --exclude-dir=.git --exclude-dir=target .
+
+  test:
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - name: Unit, API, persistence, cache and contract tests
+        run: ./mvnw --batch-mode --no-transfer-progress verify
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jacoco-report
+          path: target/site/jacoco
+          if-no-files-found: ignore
+
+  security:
+    runs-on: ubuntu-latest
+    needs: validate
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: java
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3
+
+  compose:
+    runs-on: ubuntu-latest
+    needs: [validate, test]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Validate Compose definition
+        run: docker compose config --quiet
+      - name: Build, start and smoke test the standalone stack
+        run: ./scripts/bootstrap.sh
+      - name: Verify the runtime image is non-root
+        run: test "$(docker compose exec -T product id -u)" = "10001"
+      - name: Show container state
+        if: always()
+        run: docker compose ps
+      - name: Stop the stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans
+
+  container:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build the exact local Dockerfile
+        run: docker build --tag "${IMAGE}:ci" .
+      - name: Scan the runtime image
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: ${{ env.IMAGE }}:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+  publish:
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    needs: [test, security, compose, container]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=sha,prefix=sha-,format=long
+            type=ref,event=tag
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+
+  verify-image:
+    runs-on: ubuntu-latest
+    needs: publish
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull the published digest
+        env:
+          PUBLISHED_IMAGE: ${{ env.IMAGE }}@${{ needs.publish.outputs.digest }}
+        run: |
+          docker pull "$PUBLISHED_IMAGE"
+          docker image inspect --format '{{index .RepoDigests 0}}' "$PUBLISHED_IMAGE"
+      - name: Start the standalone dependencies
+        run: docker compose up --detach --build identity product-db redis
+      - name: Start the published image without rebuilding Product
+        env:
+          PUBLISHED_IMAGE: ${{ env.IMAGE }}@${{ needs.publish.outputs.digest }}
+        run: PRODUCT_IMAGE="$PUBLISHED_IMAGE" docker compose up --detach --no-build product
+      - name: Smoke test the published image
+        run: ./scripts/smoke.sh
+      - name: Stop the stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans
