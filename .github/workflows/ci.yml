@@ -62,6 +62,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -107,7 +108,7 @@ jobs:
       - name: Build the exact local Dockerfile
         run: docker build --tag "${IMAGE}:ci" .
       - name: Scan the runtime image
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: ${{ env.IMAGE }}:ci
           format: table
