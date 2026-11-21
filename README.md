@@ -1,5 +1,7 @@
 # Product
 
+![Tech Stack](https://skillicons.dev/icons?i=java,spring,postgres,redis,aws,docker,kubernetes,grafana,prometheus)
+
 Product catalogue microservice for the [Microsserv52 platform](https://github.com/Microsserv52/platform).
 It owns product identity, display name, price and sale unit, and it is called by
 Order over HTTP when an order is created. The service is implemented with Java
